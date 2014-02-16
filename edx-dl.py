@@ -22,6 +22,7 @@ try:
     from urllib.request import HTTPCookieProcessor
     from urllib.request import Request
     from urllib.request import URLError
+    from urllib.request import urlretrieve
 except ImportError:
     from urllib2 import urlopen
     from urllib2 import build_opener
@@ -29,6 +30,7 @@ except ImportError:
     from urllib2 import HTTPCookieProcessor
     from urllib2 import Request
     from urllib2 import URLError
+    from urllib import urlretrieve
 
 # we alias the raw_input function for python 3 compatibility
 try:
@@ -148,6 +150,133 @@ def edx_get_subtitle(url, headers):
         return None
 
 
+def edx_export_cdn_urls(page_urls, headers):
+    """ returns the list of direct video urls """
+    """ and the list of subtitle urls to be downloaded """
+    video_urls = []
+    subs_urls = []
+    re_sub_path = re.compile(r'data-caption-asset-path=(?:&#34;|")([^"&]*)(?:&#34;|")')
+    re_mp4_urls = re.compile(r'data-mp4-source=(?:&#34;|")([^"&]*)(?:&#34;|")')
+    re_sub_urls = re.compile(r'data-sub=(?:&#34;|")([^"&]*)(?:&#34;|")')
+    for page_url in page_urls:
+        print("Processing '%s'..." % page_url)
+        page = get_page_contents(page_url, headers)
+        page_video_urls = re_mp4_urls.findall(page)
+        video_urls.extend(page_video_urls)
+        sub_path = re_sub_path.findall(page)
+        page_subs_urls = re_sub_urls.findall(page)
+
+        # we assume that the subtitle path doesn't change, and take the first.
+        subs_urls.extend(BASE_URL + sub_path[0] + id + ".srt.sjson"
+                         for id in page_subs_urls)
+        print("Found %s videos and %s subtitles in page" %
+              (len(page_video_urls), len(page_subs_urls)))
+    return video_urls, subs_urls
+
+
+def edx_export_youtube_urls(page_urls, headers):
+    """ returns the list of youtube links """
+    """ and the list of subtitle urls to be downloaded """
+    video_id = []
+    subsUrls = []
+    regexpSubs = re.compile(r'data-caption-asset-path=(?:&#34;|")([^"&]*)(?:&#34;|")')
+    splitter = re.compile(r'data-streams=(?:&#34;|").*1.0[0]*:')
+    extra_youtube = re.compile(r'//w{0,3}\.youtube.com/embed/([^ \?&]*)[\?& ]')
+    for page_url in page_urls:
+        print("Processing '%s'..." % page_url)
+        page = get_page_contents(page_url, headers)
+
+        id_container = splitter.split(page)[1:]
+        video_id += [link[:YOUTUBE_VIDEO_ID_LENGTH] for link in
+                     id_container]
+        subsUrls += [BASE_URL + regexpSubs.search(container).group(1) + id + ".srt.sjson"
+                     for id, container in zip(video_id[-len(id_container):], id_container)]
+        # Try to download some extra videos which is referred by iframe
+        extra_ids = extra_youtube.findall(page)
+        video_id += [link[:YOUTUBE_VIDEO_ID_LENGTH] for link in
+                     extra_ids]
+        subsUrls += ['' for link in extra_ids]
+
+    video_link = ['http://youtube.com/watch?v=' + v_id
+                  for v_id in video_id]
+    return video_link, subsUrls
+
+
+def download_youtube_videos(video_link, subsUrls, args, target_dir, headers):
+    """ this function downloads the videos and subtitles from the arguments """
+    """ using youtube-dl """
+    for c, (v, s) in enumerate(zip(video_link, subsUrls)):
+        filename_prefix = str(c+1).zfill(2)
+        cmd = ["youtube-dl",
+               "-o", os.path.join(target_dir, filename_prefix + "-%(title)s.%(ext)s")]
+        if args.format:
+            cmd.append("-f")
+            # defaults to mp4 in case the requested format isn't available
+            cmd.append(args.format + '/mp4')
+        if args.subtitles:
+            cmd.append('--write-sub')
+        cmd.append(str(v))
+
+        popen_youtube = Popen(cmd, stdout=PIPE, stderr=PIPE)
+
+        youtube_stdout = b''
+        enc = sys.getdefaultencoding()
+        while True:  # Save output to youtube_stdout while this being echoed
+            tmp = popen_youtube.stdout.read(1)
+            youtube_stdout += tmp
+            print(tmp.decode(enc), end="")
+            sys.stdout.flush()
+            # do it until the process finish and there isn't output
+            if tmp == b"" and popen_youtube.poll() is not None:
+                break
+
+        if args.subtitles:
+            video_path = get_filename(target_dir, filename_prefix)
+            subs_filename = os.path.join(target_dir, video_path + '.srt')
+            if not os.path.exists(subs_filename):
+                subs_string = edx_get_subtitle(s, headers)
+                if subs_string:
+                    # print('[debug] GET %s' % s)
+                    print('[info] Writing edX subtitles: %s' % subs_filename)
+                    open(os.path.join(os.getcwd(), subs_filename),
+                         'wb+').write(subs_string.encode('utf-8'))
+
+
+def download_cdn_videos(video_link, subsUrls, args, target_dir, headers):
+    """ This function downloads the videos from video_link """
+    """ using a simple file downloader """
+
+    # This is a dict of (filename, url) for the subs
+    # It assumes that the prefix includes the prefix subs_ (5) from (data-caption-asset-path
+    # and the postfix (-10), from https://courses.edx.org/....srt.sjson
+    sub_dict = dict((s.rsplit('/', 1)[1][5:-10], s) for s in subsUrls)
+
+    for i, v in enumerate(video_link):
+        filename_prefix = str(i+1).zfill(2) + '-'
+        original_filename = v.rsplit('/', 1)[1]
+        video_filename = filename_prefix + original_filename
+        video_path = os.path.join(target_dir, video_filename)
+
+        # print('[debug] GET %s' % v)
+        print('[download] Destination: %s' % video_path)
+        urlretrieve(v, video_path)
+
+        if args.subtitles:
+            noext_filename = original_filename[:-4]
+            sub_url = sub_dict.get(noext_filename)
+            if sub_url:
+                # first we find the subtitle and if it matches we download it
+                sub_filename = filename_prefix + noext_filename + '.srt'
+                subs_path = os.path.join(target_dir, sub_filename)
+                if not os.path.exists(subs_path):
+                    subs_string = edx_get_subtitle(sub_url, headers)
+                    if subs_string:
+                        # print('[debug] GET %s' % sub_url)
+                        print('[download] Destination: %s' % subs_path)
+                        open(os.path.join(os.getcwd(), subs_path),
+                             'wb+').write(subs_string.encode('utf-8'))
+
+
 def parse_args():
     """
     Parse the arguments/options passed to the program on the command line.
@@ -198,6 +327,12 @@ def parse_args():
                         dest='platform',
                         help='OpenEdX platform, currently either "edx" or "stanford"',
                         default='edx')
+    parser.add_argument('-c',
+                        '--use-cdn',
+                        action='store_true',
+                        dest='use_cdn',
+                        help='use cdn instead of youtube-dl to get the videos',
+                        default=False)
 
     args = parser.parse_args()
     return args
@@ -283,10 +418,10 @@ def main():
     soup = BeautifulSoup(courseware)
 
     data = soup.find('nav',
-                     {'aria-label':'Course Navigation'})
+                     {'aria-label': 'Course Navigation'})
     WEEKS = data.find_all('div')
     weeks = [(w.h3.a.string, [BASE_URL + a['href'] for a in
-             w.ul.find_all('a')]) for w in WEEKS]
+                              w.ul.find_all('a')]) for w in WEEKS]
     numOfWeeks = len(weeks)
 
     # Choose Week or choose all
@@ -307,82 +442,39 @@ def main():
     else:
         links = weeks[w_number - 1][1]
 
-    video_id = []
-    subsUrls = []
-    regexpSubs = re.compile(r'data-caption-asset-path=(?:&#34;|")([^"&]*)(?:&#34;|")')
-    splitter = re.compile(r'data-streams=(?:&#34;|").*1.0[0]*:')
-    extra_youtube = re.compile(r'//w{0,3}\.youtube.com/embed/([^ \?&]*)[\?& ]')
-    for link in links:
-        print("Processing '%s'..." % link)
-        page = get_page_contents(link, headers)
+    target_dir = os.path.join(args.output_dir,
+                              directory_name(selected_course[0]))
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
 
-        id_container = splitter.split(page)[1:]
-        video_id += [link[:YOUTUBE_VIDEO_ID_LENGTH] for link in
-                     id_container]
-        subsUrls += [BASE_URL + regexpSubs.search(container).group(1) + id + ".srt.sjson"
-                     for id, container in zip(video_id[-len(id_container):], id_container)]
-        # Try to download some extra videos which is referred by iframe
-        extra_ids = extra_youtube.findall(page)
-        video_id += [link[:YOUTUBE_VIDEO_ID_LENGTH] for link in
-                     extra_ids]
-        subsUrls += ['' for link in extra_ids]
+    if is_interactive:
+        args.use_cdn = input('Use youtube-dl to download videos (y/n)? ').lower() == 'n'
 
-    video_link = ['http://youtube.com/watch?v=' + v_id
-                  for v_id in video_id]
+    # get the urls of the videos and subtitles from the pages (links)
+    if args.use_cdn:
+        video_link, subsUrls = edx_export_cdn_urls(links, headers)
+    else:
+        video_link, subsUrls = edx_export_youtube_urls(links, headers)
 
     if len(video_link) < 1:
         print('WARNING: No downloadable video found.')
         sys.exit(0)
 
     if is_interactive:
-        # Get Available Video formats
-        os.system('youtube-dl -F %s' % video_link[-1])
-        print('Choose a valid format or a set of valid format codes e.g. 22/17/...')
-        args.format = input('Choose Format code: ')
-
+        if not args.use_cdn:
+            # Get Available Video formats
+            os.system('youtube-dl -F %s' % video_link[-1])
+            print('Choose a valid format or a set of valid format codes e.g. 22/17/...')
+            args.format = input('Choose Format code: ')
         args.subtitles = input('Download subtitles (y/n)? ').lower() == 'y'
 
     print("[info] Output directory: " + args.output_dir)
 
     # Download Videos
-    c = 0
-    for v, s in zip(video_link, subsUrls):
-        c += 1
-        target_dir = os.path.join(args.output_dir,
-                                  directory_name(selected_course[0]))
-        filename_prefix = str(c).zfill(2)
-        cmd = ["youtube-dl",
-               "-o", os.path.join(target_dir, filename_prefix + "-%(title)s.%(ext)s")]
-        if args.format:
-            cmd.append("-f")
-            # defaults to mp4 in case the requested format isn't available
-            cmd.append(args.format + '/mp4')
-        if args.subtitles:
-            cmd.append('--write-sub')
-        cmd.append(str(v))
-
-        popen_youtube = Popen(cmd, stdout=PIPE, stderr=PIPE)
-
-        youtube_stdout = b''
-        enc = sys.getdefaultencoding()
-        while True:  # Save output to youtube_stdout while this being echoed
-            tmp = popen_youtube.stdout.read(1)
-            youtube_stdout += tmp
-            print(tmp.decode(enc), end="")
-            sys.stdout.flush()
-            # do it until the process finish and there isn't output
-            if tmp == b"" and popen_youtube.poll() is not None:
-                break
-
-        if args.subtitles:
-            filename = get_filename(target_dir, filename_prefix)
-            subs_filename = os.path.join(target_dir, filename + '.srt')
-            if not os.path.exists(subs_filename):
-                subs_string = edx_get_subtitle(s, headers)
-                if subs_string:
-                    print('[info] Writing edX subtitles: %s' % subs_filename)
-                    open(os.path.join(os.getcwd(), subs_filename),
-                         'wb+').write(subs_string.encode('utf-8'))
+    if args.use_cdn:
+        download_cdn_videos(video_link, subsUrls, args, target_dir, headers)
+    else:
+        download_youtube_videos(video_link, subsUrls, args, target_dir, headers)
 
 
 def get_filename(target_dir, filename_prefix):
