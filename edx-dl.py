@@ -53,12 +53,16 @@ from bs4 import BeautifulSoup
 
 OPENEDX_SITES = {
     'edx': {
-        'url': 'https://courses.edx.org', 
-        'courseware-selector': ('nav', {'aria-label':'Course Navigation'}),
-    }, 
+        'url': 'https://courses.edx.org',
+        'courseware-selector': ('nav', {'aria-label': 'Course Navigation'}),
+    },
     'stanford': {
         'url': 'https://class.stanford.edu',
-        'courseware-selector': ('section', {'aria-label':'Course Navigation'}),
+        'courseware-selector': ('section', {'aria-label': 'Course Navigation'}),
+    },
+    'fun': {
+        'url': 'https://www.france-universite-numerique-mooc.fr',
+        'courseware-selector': ('section', {'aria-label': 'Menu du cours'}),
     },
 }
 BASE_URL = OPENEDX_SITES['edx']['url']
