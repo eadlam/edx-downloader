@@ -394,11 +394,9 @@ def main():
         print(resp.get('value', "Wrong Email or Password."))
         exit(2)
 
-    # Get user info/courses
+    # Get courses
     dash = get_page_contents(DASHBOARD, headers)
     soup = BeautifulSoup(dash)
-    data = soup.find_all('ul')[1]
-    USERNAME = data.find_all('span')[1].string
     COURSES = soup.find_all('article', 'course')
     courses = []
     for COURSE in COURSES:
@@ -411,9 +409,6 @@ def main():
         courses.append((c_name, c_link, state))
     numOfCourses = len(courses)
 
-    # Welcome and Choose Course
-
-    print('Welcome %s' % USERNAME)
     print('You can access %d courses' % numOfCourses)
 
     c = 0
